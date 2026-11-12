@@ -22,8 +22,8 @@ dependencies:
   path_provider: ^2.1.6
   # 把成片写入系统相册（内部走 MediaStore，Android 10+ 免存储权限）
   gal: ^2.3.3
-  # 运行时权限申请
-  permission_handler: ^13.0.2
+  # 运行时权限申请（13.x 的 android 子插件要求 compileSdk 37，与当前 AGP 9.1.0 / SDK 36 不兼容，暂锁 12.0.3）
+  permission_handler: ^12.0.3
 
 dev_dependencies:
   flutter_test:

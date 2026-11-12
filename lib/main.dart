@@ -751,7 +751,7 @@ class ColorTemplate {
 
 /// 内置预设：一键套用，不进沙盒、不可删除。
 /// 字段顺序：亮度 对比度 饱和度 色温 锐化 高光 阴影 色调 曝光 褪色。
-const List<ColorTemplate> _kBuiltinTemplates = <ColorTemplate>[
+final List<ColorTemplate> _kBuiltinTemplates = <ColorTemplate>[
   ColorTemplate(
     id: 'builtin-bright',
     name: '明亮清新',

@@ -59,6 +59,9 @@ class AdjustParams {
     this.sharpen = 0.0,
     this.highlights = 0.0,
     this.shadows = 0.0,
+    this.tint = 0.0,
+    this.exposure = 0.0,
+    this.fade = 0.0,
   });
 
   /// 全部归零的中性参数（"重置参数"用它）
@@ -71,6 +74,9 @@ class AdjustParams {
   final double sharpen; // 锐化 0..100
   final double highlights; // 高光 -100..100
   final double shadows; // 阴影 -100..100
+  final double tint; // 色调 -100..100（正=品红，负=绿）
+  final double exposure; // 曝光 -100..100（乘法增益）
+  final double fade; // 褪色 0..100（向中灰混合的胶片灰雾）
 
   bool get isNeutral =>
       brightness == 0 &&
@@ -79,7 +85,10 @@ class AdjustParams {
       temperature == 0 &&
       sharpen == 0 &&
       highlights == 0 &&
-      shadows == 0;
+      shadows == 0 &&
+      tint == 0 &&
+      exposure == 0 &&
+      fade == 0;
 
   AdjustParams copyWith({
     double? brightness,
@@ -89,6 +98,9 @@ class AdjustParams {
     double? sharpen,
     double? highlights,
     double? shadows,
+    double? tint,
+    double? exposure,
+    double? fade,
   }) {
     return AdjustParams(
       brightness: brightness ?? this.brightness,
@@ -98,6 +110,9 @@ class AdjustParams {
       sharpen: sharpen ?? this.sharpen,
       highlights: highlights ?? this.highlights,
       shadows: shadows ?? this.shadows,
+      tint: tint ?? this.tint,
+      exposure: exposure ?? this.exposure,
+      fade: fade ?? this.fade,
     );
   }
 
@@ -110,6 +125,9 @@ class AdjustParams {
     'sharpen': sharpen,
     'highlights': highlights,
     'shadows': shadows,
+    'tint': tint,
+    'exposure': exposure,
+    'fade': fade,
   };
 
   factory AdjustParams.fromJson(Map<String, dynamic> json) {
@@ -127,6 +145,9 @@ class AdjustParams {
       sharpen: d('sharpen'),
       highlights: d('highlights'),
       shadows: d('shadows'),
+      tint: d('tint'),
+      exposure: d('exposure'),
+      fade: d('fade'),
     );
   }
 
@@ -139,7 +160,10 @@ class AdjustParams {
       other.temperature == temperature &&
       other.sharpen == sharpen &&
       other.highlights == highlights &&
-      other.shadows == shadows;
+      other.shadows == shadows &&
+      other.tint == tint &&
+      other.exposure == exposure &&
+      other.fade == fade;
 
   @override
   int get hashCode => Object.hash(
@@ -150,6 +174,9 @@ class AdjustParams {
     sharpen,
     highlights,
     shadows,
+    tint,
+    exposure,
+    fade,
   );
 }
 
@@ -188,6 +215,9 @@ class PixelEngine {
   /// 饱和度系数，定点 256 = 1.0
   int satMul = 256;
 
+  /// 褪色系数，定点 256 = 不褪色；其余按比例与中灰 128 混合
+  int fadeMul = 256;
+
   void _build(AdjustParams p) {
     // 亮度：最多 ±0.35（归一化 0..1 上的偏移量）
     final double bOff = (p.brightness / 100.0) * 0.35;
@@ -198,16 +228,23 @@ class PixelEngine {
     // 高光 / 阴影：按亮度平方加权，最大 ±0.30
     final double hi = (p.highlights / 100.0) * 0.30;
     final double sh = (p.shadows / 100.0) * 0.30;
+    // 曝光：乘法增益 0.4x ~ 1.6x
+    final double eGain = 1.0 + (p.exposure / 100.0) * 0.6;
+    // 色调：正数偏品红（R/B↑ G↓），负数偏绿
+    final double tintAmt = (p.tint / 100.0) * 0.10;
+    // 褪色：0..0.35 比例向中灰混合
+    final double fadeK = (p.fade / 100.0) * 0.35;
 
     satMul = ((1.0 + p.saturation / 100.0) * 256.0).round().clamp(0, 512);
+    fadeMul = ((1.0 - fadeK) * 256.0).round().clamp(0, 256);
 
     for (int i = 0; i < 256; i++) {
       final double v = i / 255.0;
-      // 先亮度，再对比度（围绕中灰 0.5）
-      final double nm = ((v + bOff) - 0.5) * k + 0.5;
-      lutR[i] = _q255(nm + tShift * 1.0);
-      lutG[i] = _q255(nm + tShift * 0.15);
-      lutB[i] = _q255(nm - tShift * 1.0);
+      // 先亮度，再对比度（围绕中灰 0.5），再曝光乘法增益
+      final double nm = (((v + bOff) - 0.5) * k + 0.5) * eGain;
+      lutR[i] = _q255(nm + tShift * 1.0 + tintAmt);
+      lutG[i] = _q255(nm + tShift * 0.15 - tintAmt);
+      lutB[i] = _q255(nm - tShift * 1.0 + tintAmt);
     }
 
     for (int l = 0; l < 256; l++) {
@@ -229,6 +266,8 @@ void applyColorPipeline(Uint8List px, int w, int h, PixelEngine eng) {
   final Uint8List lutB = eng.lutB;
   final Int16List tone = eng.tone;
   final int satMul = eng.satMul;
+  final int fadeMul = eng.fadeMul;
+  final int fadeGray = 256 - fadeMul; // 中灰混合系数，0 = 不褪色
   final int total = w * h * 4;
 
   for (int o = 0; o < total; o += 4) {
@@ -249,6 +288,13 @@ void applyColorPipeline(Uint8List px, int w, int h, PixelEngine eng) {
     rr = _clamp255(l2 + (((rr - l2) * satMul) >> 8));
     gg = _clamp255(l2 + (((gg - l2) * satMul) >> 8));
     bb = _clamp255(l2 + (((bb - l2) * satMul) >> 8));
+
+    // 4) 褪色：向中灰 128 混合（fadeGray=0 时保持原值）
+    if (fadeGray > 0) {
+      rr = _clamp255((rr * fadeMul + 128 * fadeGray) >> 8);
+      gg = _clamp255((gg * fadeMul + 128 * fadeGray) >> 8);
+      bb = _clamp255((bb * fadeMul + 128 * fadeGray) >> 8);
+    }
 
     px[o] = rr;
     px[o + 1] = gg;
@@ -439,6 +485,8 @@ FrameResponse renderCameraFrame(FrameRequest r) {
   final Uint8List lutB = eng.lutB;
   final Int16List tone = eng.tone;
   final int satMul = eng.satMul;
+  final int fadeMul = eng.fadeMul;
+  final int fadeGray = 256 - fadeMul;
 
   // 逆映射：把输出坐标 (dx,dy) 映射回降采样坐标系 (sx,sy)，系数只有 0/±1
   final (int ax, int bx, int cx, int ay, int by, int cy) = switch (rot) {
@@ -529,6 +577,13 @@ FrameResponse renderCameraFrame(FrameRequest r) {
       rr = _clamp255(l2 + (((rr - l2) * satMul) >> 8));
       gg = _clamp255(l2 + (((gg - l2) * satMul) >> 8));
       bb = _clamp255(l2 + (((bb - l2) * satMul) >> 8));
+
+      // 褪色：与 applyColorPipeline 一致，向中灰 128 混合
+      if (fadeGray > 0) {
+        rr = _clamp255((rr * fadeMul + 128 * fadeGray) >> 8);
+        gg = _clamp255((gg * fadeMul + 128 * fadeGray) >> 8);
+        bb = _clamp255((bb * fadeMul + 128 * fadeGray) >> 8);
+      }
 
       out[o] = rr;
       out[o + 1] = gg;
@@ -661,12 +716,16 @@ class ColorTemplate {
     required this.name,
     required this.params,
     required this.createdAt,
+    this.builtin = false,
   });
 
   final String id;
   final String name;
   final AdjustParams params;
   final DateTime createdAt;
+
+  /// 内置预设：不写入沙盒、不可删除
+  final bool builtin;
 
   Map<String, dynamic> toJson() => <String, dynamic>{
     'id': id,
@@ -689,6 +748,114 @@ class ColorTemplate {
     );
   }
 }
+
+/// 内置预设：一键套用，不进沙盒、不可删除。
+/// 字段顺序：亮度 对比度 饱和度 色温 锐化 高光 阴影 色调 曝光 褪色。
+const List<ColorTemplate> _kBuiltinTemplates = <ColorTemplate>[
+  ColorTemplate(
+    id: 'builtin-bright',
+    name: '明亮清新',
+    createdAt: DateTime.utc(2024, 1, 1),
+    builtin: true,
+    params: AdjustParams(
+      brightness: 18,
+      contrast: 10,
+      saturation: 12,
+      temperature: 8,
+      highlights: 10,
+      shadows: 12,
+      exposure: 10,
+      fade: 8,
+    ),
+  ),
+  ColorTemplate(
+    id: 'builtin-sunset',
+    name: '暖阳夕阳',
+    createdAt: DateTime.utc(2024, 1, 1),
+    builtin: true,
+    params: AdjustParams(
+      brightness: 8,
+      contrast: 14,
+      saturation: 18,
+      temperature: 35,
+      highlights: 6,
+      shadows: 10,
+      tint: 6,
+      fade: 12,
+    ),
+  ),
+  ColorTemplate(
+    id: 'builtin-cool',
+    name: '清冷通透',
+    createdAt: DateTime.utc(2024, 1, 1),
+    builtin: true,
+    params: AdjustParams(
+      brightness: 6,
+      contrast: 8,
+      saturation: -6,
+      temperature: -28,
+      shadows: 8,
+      tint: -6,
+      exposure: 6,
+    ),
+  ),
+  ColorTemplate(
+    id: 'builtin-bw',
+    name: '黑白复古',
+    createdAt: DateTime.utc(2024, 1, 1),
+    builtin: true,
+    params: AdjustParams(
+      contrast: 22,
+      saturation: -100,
+      highlights: -8,
+      shadows: 14,
+      sharpen: 10,
+      fade: 28,
+    ),
+  ),
+  ColorTemplate(
+    id: 'builtin-cine',
+    name: '电影高对比',
+    createdAt: DateTime.utc(2024, 1, 1),
+    builtin: true,
+    params: AdjustParams(
+      contrast: 28,
+      saturation: 10,
+      highlights: -16,
+      shadows: -10,
+      temperature: -6,
+      fade: 10,
+    ),
+  ),
+  ColorTemplate(
+    id: 'builtin-japanese',
+    name: '柔和日系',
+    createdAt: DateTime.utc(2024, 1, 1),
+    builtin: true,
+    params: AdjustParams(
+      brightness: 12,
+      contrast: -12,
+      saturation: -10,
+      temperature: 10,
+      highlights: 14,
+      shadows: 16,
+      fade: 22,
+    ),
+  ),
+  ColorTemplate(
+    id: 'builtin-food',
+    name: '浓郁美食',
+    createdAt: DateTime.utc(2024, 1, 1),
+    builtin: true,
+    params: AdjustParams(
+      contrast: 16,
+      saturation: 30,
+      temperature: 12,
+      highlights: 4,
+      fade: 6,
+    ),
+  ),
+];
 
 /// 模板只存参数 JSON，落在 getApplicationSupportDirectory()/templates/ 下
 /// Android 实际路径形如：
@@ -857,7 +1024,178 @@ final List<_ParamSpec> _kSpecs = <_ParamSpec>[
     (p) => p.shadows,
     (p, v) => p.copyWith(shadows: v),
   ),
+  _ParamSpec(
+    '色调',
+    Icons.colorize_outlined,
+    -100,
+    100,
+    (p) => p.tint,
+    (p, v) => p.copyWith(tint: v),
+  ),
+  _ParamSpec(
+    '曝光',
+    Icons.exposure_outlined,
+    -100,
+    100,
+    (p) => p.exposure,
+    (p, v) => p.copyWith(exposure: v),
+  ),
+  _ParamSpec(
+    '褪色',
+    Icons.gradient,
+    0,
+    100,
+    (p) => p.fade,
+    (p, v) => p.copyWith(fade: v),
+  ),
 ];
+
+/// 单个参数行：滑块 + 可直接输入数值的小输入框，二者双向联动。
+class _ParamRow extends StatefulWidget {
+  const _ParamRow({
+    required this.spec,
+    required this.value,
+    required this.onChanged,
+    required this.onReset,
+  });
+
+  final _ParamSpec spec;
+  final double value;
+  final ValueChanged<double> onChanged;
+  final VoidCallback onReset;
+
+  @override
+  State<_ParamRow> createState() => _ParamRowState();
+}
+
+class _ParamRowState extends State<_ParamRow> {
+  late final TextEditingController _ctrl;
+  late final FocusNode _focus;
+  bool _typing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = TextEditingController(text: widget.value.toInt().toString());
+    _focus = FocusNode();
+    _focus.addListener(_onFocusChange);
+  }
+
+  void _onFocusChange() {
+    if (!_focus.hasFocus) _commit();
+  }
+
+  @override
+  void didUpdateWidget(_ParamRow oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    // 非输入状态下，外部（滑块/模板/重置）改值时同步文本
+    if (!_typing && widget.value.toInt() != oldWidget.value.toInt()) {
+      _ctrl.text = widget.value.toInt().toString();
+    }
+  }
+
+  /// 解析输入、clamp 到参数范围并取整后写回；非法输入回退当前值。
+  void _commit() {
+    final String raw = _ctrl.text.trim();
+    final double? parsed = raw.isEmpty ? null : double.tryParse(raw);
+    double v = widget.value;
+    if (parsed != null) v = parsed;
+    v = v.clamp(widget.spec.min, widget.spec.max).roundToDouble();
+    final String text = v.toInt().toString();
+    if (_ctrl.text != text) _ctrl.text = text;
+    _typing = false;
+    if (v != widget.value) widget.onChanged(v);
+  }
+
+  @override
+  void dispose() {
+    _focus.removeListener(_onFocusChange);
+    _focus.dispose();
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final _ParamSpec spec = widget.spec;
+    final double value = widget.value.clamp(spec.min, spec.max);
+    final bool active = value != 0;
+    return SizedBox(
+      height: 44,
+      child: Row(
+        children: <Widget>[
+          Icon(spec.icon, size: 16, color: Colors.white54),
+          const SizedBox(width: 8),
+          SizedBox(
+            width: 42,
+            child: Text(
+              spec.label,
+              style: const TextStyle(fontSize: 12, color: Colors.white70),
+            ),
+          ),
+          Expanded(
+            child: Slider(
+              min: spec.min,
+              max: spec.max,
+              value: value,
+              onChanged: (double v) {
+                _typing = false;
+                _ctrl.text = v.toInt().toString();
+                widget.onChanged(v);
+              },
+            ),
+          ),
+          SizedBox(
+            width: 50,
+            child: TextField(
+              controller: _ctrl,
+              focusNode: _focus,
+              keyboardType: const TextInputType.numberWithOptions(
+                signed: true,
+                decimal: false,
+              ),
+              textAlign: TextAlign.right,
+              style: TextStyle(
+                fontSize: 11,
+                color: active ? const Color(0xFF8FA6FF) : Colors.white38,
+              ),
+              decoration: const InputDecoration(
+                isDense: true,
+                contentPadding: EdgeInsets.zero,
+                border: InputBorder.none,
+                hintText: '0',
+              ),
+              onTap: () {
+                _typing = true;
+                _ctrl.selection = TextSelection(
+                  baseOffset: 0,
+                  extentOffset: _ctrl.text.length,
+                );
+              },
+              onSubmitted: (_) {
+                _commit();
+                _focus.unfocus();
+              },
+            ),
+          ),
+          SizedBox(
+            width: 26,
+            height: 26,
+            child: InkWell(
+              borderRadius: BorderRadius.circular(13),
+              onTap: widget.onReset,
+              child: const Icon(
+                Icons.close,
+                size: 14,
+                color: Colors.white24,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
 
 class GraderPage extends StatefulWidget {
   const GraderPage({super.key});
@@ -973,7 +1311,7 @@ class _GraderPageState extends State<GraderPage> with WidgetsBindingObserver {
           maxLength: 24,
           decoration: const InputDecoration(
             labelText: '模板名称',
-            helperText: '只保存 7 个参数，不保存图片',
+            helperText: '只保存 10 个参数，不保存图片',
           ),
         ),
         actions: <Widget>[
@@ -1029,6 +1367,44 @@ class _GraderPageState extends State<GraderPage> with WidgetsBindingObserver {
     _toast('已加载「${tpl.name}」');
   }
 
+  Widget _templateTile(
+    ColorTemplate t,
+    int badge, {
+    required bool builtin,
+    required BuildContext sheetCtx,
+    required StateSetter? setSheet,
+  }) {
+    return ListTile(
+      leading: CircleAvatar(
+        backgroundColor: const Color(0xFF2A2D34),
+        child: builtin
+            ? const Icon(Icons.auto_awesome, size: 14, color: Colors.white54)
+            : Text('$badge', style: const TextStyle(fontSize: 12)),
+      ),
+      title: Text(t.name),
+      subtitle: Text(
+        _summary(t.params),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+        style: const TextStyle(fontSize: 11),
+      ),
+      trailing: builtin
+          ? null
+          : IconButton(
+              tooltip: '删除',
+              icon: const Icon(Icons.delete_outline, size: 20),
+              onPressed: () async {
+                await _deleteTemplate(t);
+                setSheet?.call(() {});
+              },
+            ),
+      onTap: () {
+        Navigator.pop(sheetCtx);
+        _applyTemplate(t);
+      },
+    );
+  }
+
   Future<void> _showTemplateSheet() async {
     await _loadTemplates();
     if (!mounted) return;
@@ -1071,52 +1447,58 @@ class _GraderPageState extends State<GraderPage> with WidgetsBindingObserver {
                     ),
                   ),
                   Expanded(
-                    child: _templates.isEmpty
-                        ? const Center(
+                    child: ListView(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      children: <Widget>[
+                        const Padding(
+                          padding: EdgeInsets.fromLTRB(16, 8, 16, 2),
+                          child: Text(
+                            '内置预设',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white54,
+                            ),
+                          ),
+                        ),
+                        for (int i = 0; i < _kBuiltinTemplates.length; i++)
+                          _templateTile(
+                            _kBuiltinTemplates[i],
+                            i + 1,
+                            builtin: true,
+                            sheetCtx: ctx,
+                            setSheet: null,
+                          ),
+                        const Padding(
+                          padding: EdgeInsets.fromLTRB(16, 12, 16, 2),
+                          child: Text(
+                            '我的模板',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                              color: Colors.white54,
+                            ),
+                          ),
+                        ),
+                        if (_templates.isEmpty)
+                          const Padding(
+                            padding: EdgeInsets.fromLTRB(16, 10, 16, 10),
                             child: Text(
-                              '还没有模板，调好参数后点「保存模板」',
-                              style: TextStyle(color: Colors.white54),
+                              '还没有自定义模板，调好参数后点「保存当前」',
+                              style: TextStyle(color: Colors.white54, fontSize: 12),
                             ),
                           )
-                        : ListView.separated(
-                            itemCount: _templates.length,
-                            separatorBuilder: (_, _) =>
-                                const Divider(height: 1, color: Colors.white12),
-                            itemBuilder: (BuildContext c, int i) {
-                              final ColorTemplate t = _templates[i];
-                              return ListTile(
-                                leading: CircleAvatar(
-                                  backgroundColor: const Color(0xFF2A2D34),
-                                  child: Text(
-                                    '${i + 1}',
-                                    style: const TextStyle(fontSize: 12),
-                                  ),
-                                ),
-                                title: Text(t.name),
-                                subtitle: Text(
-                                  _summary(t.params),
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(fontSize: 11),
-                                ),
-                                trailing: IconButton(
-                                  tooltip: '删除',
-                                  icon: const Icon(
-                                    Icons.delete_outline,
-                                    size: 20,
-                                  ),
-                                  onPressed: () async {
-                                    await _deleteTemplate(t);
-                                    setSheet(() {});
-                                  },
-                                ),
-                                onTap: () {
-                                  Navigator.pop(ctx);
-                                  _applyTemplate(t);
-                                },
-                              );
-                            },
-                          ),
+                        else
+                          for (int i = 0; i < _templates.length; i++)
+                            _templateTile(
+                              _templates[i],
+                              i + 1,
+                              builtin: false,
+                              sheetCtx: ctx,
+                              setSheet: setSheet,
+                            ),
+                      ],
+                    ),
                   ),
                   if (_templatePath.isNotEmpty)
                     Padding(
@@ -1141,7 +1523,8 @@ class _GraderPageState extends State<GraderPage> with WidgetsBindingObserver {
   String _summary(AdjustParams p) {
     String f(double v) => v >= 0 ? '+${v.toInt()}' : '${v.toInt()}';
     return '亮${f(p.brightness)} 对${f(p.contrast)} 饱和${f(p.saturation)} '
-        '温${f(p.temperature)} 锐${p.sharpen.toInt()} 高${f(p.highlights)} 阴${f(p.shadows)}';
+        '温${f(p.temperature)} 锐${p.sharpen.toInt()} 高${f(p.highlights)} '
+        '阴${f(p.shadows)} 调${f(p.tint)} 曝${f(p.exposure)} 褪${p.fade.toInt()}';
   }
 
   // ==========================================================================
@@ -1786,7 +2169,7 @@ class _GraderPageState extends State<GraderPage> with WidgetsBindingObserver {
 
   Widget _buildSliders() {
     return Container(
-      height: 208,
+      height: 300,
       margin: const EdgeInsets.fromLTRB(10, 8, 10, 4),
       decoration: BoxDecoration(
         color: const Color(0xFF17191E),
@@ -1797,66 +2180,17 @@ class _GraderPageState extends State<GraderPage> with WidgetsBindingObserver {
         itemCount: _kSpecs.length,
         itemBuilder: (BuildContext c, int i) {
           final _ParamSpec spec = _kSpecs[i];
-          final double value = spec.read(_params);
-          return SizedBox(
-            height: 44,
-            child: Row(
-              children: <Widget>[
-                Icon(spec.icon, size: 16, color: Colors.white54),
-                const SizedBox(width: 8),
-                SizedBox(
-                  width: 42,
-                  child: Text(
-                    spec.label,
-                    style: const TextStyle(fontSize: 12, color: Colors.white70),
-                  ),
-                ),
-                Expanded(
-                  child: Slider(
-                    min: spec.min,
-                    max: spec.max,
-                    value: value.clamp(spec.min, spec.max),
-                    onChanged: (double v) {
-                      setState(() => _params = spec.write(_params, v));
-                      _schedulePreviewRender();
-                    },
-                    onChangeEnd: (double v) {
-                      // 松手再算一次，保证最终画面与滑块值严格一致
-                      _schedulePreviewRender();
-                    },
-                  ),
-                ),
-                SizedBox(
-                  width: 40,
-                  child: Text(
-                    value.toInt().toString(),
-                    textAlign: TextAlign.right,
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: value == 0
-                          ? Colors.white38
-                          : const Color(0xFF8FA6FF),
-                    ),
-                  ),
-                ),
-                SizedBox(
-                  width: 26,
-                  height: 26,
-                  child: InkWell(
-                    borderRadius: BorderRadius.circular(13),
-                    onTap: () {
-                      setState(() => _params = spec.write(_params, 0));
-                      _schedulePreviewRender();
-                    },
-                    child: const Icon(
-                      Icons.close,
-                      size: 14,
-                      color: Colors.white24,
-                    ),
-                  ),
-                ),
-              ],
-            ),
+          return _ParamRow(
+            spec: spec,
+            value: spec.read(_params),
+            onChanged: (double v) {
+              setState(() => _params = spec.write(_params, v));
+              _schedulePreviewRender();
+            },
+            onReset: () {
+              setState(() => _params = spec.write(_params, 0));
+              _schedulePreviewRender();
+            },
           );
         },
       ),
@@ -1950,13 +2284,15 @@ class _GraderPageState extends State<GraderPage> with WidgetsBindingObserver {
         title: const Text('使用说明'),
         content: const SingleChildScrollView(
           child: Text(
-            '1. 相簿模式：导入图片后拖动滑块，预览由「原图缩略图」实时重算；'
+            '1. 相簿模式：导入图片后拖动滑块，或直接在右侧输入数值微调，'
+            '预览由「原图缩略图」实时重算；'
             '点「导出保存」会重新读取原始文件、用当前参数算一遍，所以反复导出不会掉画质、'
             '也不会把调色叠起来。\n\n'
             '2. 相机模式：取景器每一帧都在后台 isolate 里套用当前参数，'
             '滑块一动画面立刻变化；按快门会先停流、拍下原始照片，'
             '再把整套参数应用到原始照片上保存。\n\n'
-            '3. 模板只保存 7 个参数（JSON），不含任何图片；'
+            '3. 模板分「内置预设」和「我的模板」：内置预设一键套用、不可删除；'
+            '自定义模板只保存 10 个参数（JSON），不含任何图片，'
             '存放在应用沙盒的 templates/color_templates.json。\n\n'
             '4. 成片保存在系统相册的 $_kAlbumName 相簿里。',
             style: TextStyle(fontSize: 12, height: 1.5),

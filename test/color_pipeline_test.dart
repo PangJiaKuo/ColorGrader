@@ -140,7 +140,7 @@ void main() {
     expect(px[rowStart + 12], 200);
   });
 
-  test('参数 JSON 往返无损（模板只存 7 个数值）', () {
+  test('参数 JSON 往返无损（模板只存 10 个数值）', () {
     const AdjustParams p = AdjustParams(
       brightness: 12,
       contrast: -34,
@@ -149,10 +149,13 @@ void main() {
       sharpen: 88,
       highlights: -9,
       shadows: 41,
+      tint: -15,
+      exposure: 20,
+      fade: 33,
     );
     final AdjustParams back = AdjustParams.fromJson(p.toJson());
     expect(back, p);
-    expect(p.toJson().length, 7);
+    expect(p.toJson().length, 10);
   });
 
   test('相机帧渲染：旋转 90 会交换输出宽高，且不崩', () {

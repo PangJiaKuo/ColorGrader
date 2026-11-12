@@ -1,0 +1,12 @@
+include: package:flutter_lints/flutter.yaml
+
+analyzer:
+  exclude:
+    - build/**
+    - android/**
+
+linter:
+  rules:
+    # 本项目刻意使用大量显式类型标注，其余沿用 flutter_lints 默认规则
+    prefer_single_quotes: true
+    avoid_print: true

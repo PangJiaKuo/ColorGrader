@@ -1,0 +1,34 @@
+name: color_grader
+description: "本地离线运行的 Flutter 图片调色 App：相簿调色 + 摄像头实时滤镜取景"
+publish_to: 'none'
+
+# version 会被 flutter build 写入 versionName / versionCode
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.0
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # 摄像头流 + 拍照（ImageStream 用于实时滤镜，takePicture 用于高清原始照片）
+  camera: ^0.12.2
+  # 纯 Dart 图像库：JPEG 解码/编码、缩放、逐像素处理
+  image: ^4.12.0
+  # 系统相册选图（Android 13+ 走 Photo Picker，不需要读权限也能用）
+  image_picker: ^1.2.4
+  # 拿应用沙盒目录（模板 JSON 存放处）
+  path_provider: ^2.1.6
+  # 把成片写入系统相册（内部走 MediaStore，Android 10+ 免存储权限）
+  gal: ^2.3.3
+  # 运行时权限申请
+  permission_handler: ^13.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+
+flutter:
+  uses-material-design: true
